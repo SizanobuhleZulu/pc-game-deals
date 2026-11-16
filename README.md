@@ -144,9 +144,7 @@ Portal 2:  = (9.99 − 0.99) ÷ 9.99 × 100
 - [Frankfurter exchange-rate API](https://frankfurter.dev/)
 - [Playwright docs](https://playwright.dev/): especially `page.route()` for mocking
 - [TypeScript: JSDoc reference](https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html)
-- **Claude (AI assistant)**: helped me plan the structure, draft the code, and review edge cases. I went through every function and can explain how and why it works.
-  <!-- ✏️ Be specific and honest here: say what you used AI for and what you did yourself. -->
-
+- **Claude (AI assistant)**: I used Claude to write most of the code, so that I could spend my time understanding it rather than typing it. I chose to treat the optional Part C as required, and after the first version I pushed for the improvements I'd listed as future work (server-side search, pagination, caching, Rand conversion, browser tests and type-checking) to be built rather than left as ideas. I set up the repository, deployed the live demo, tested every feature myself, and studied each function until I could explain how and why it works.
 ## Time taken
 
 About **2 hours 20 minutes** in total, over two sessions:
