@@ -11,23 +11,26 @@ import {
   sortDeals,
   formatPrice,
   normalizeCheapSharkDeal,
+  convertPrices,
 } from "./src/deals.js";
 
 const API = "https://www.cheapshark.com/api/1.0";
+const RATES_API = "https://api.frankfurter.dev/v1/latest?base=USD&symbols=ZAR";
+const PAGE_SIZE = 24;
+const CACHE_MINUTES = 10;
 
 // ---- State: one object describes everything on screen --------------------
 const state = {
-  source: "local",   // "local" | "live"
+  source: "local",     // "local" | "live"
   deals: briefDeals,
   query: "",
   onSaleOnly: false,
   sort: "featured",
-  loading: false,
-};
-
-const SOURCES = {
-  local: { symbol: "R", note: "Prices in South African Rand (ZAR)" },
-  live: { symbol: "$", note: "Live prices from CheapShark are in US dollars (USD)" },
+  loading: false,      // first page of live data is loading
+  loadingMore: false,  // "Load more" is loading the next page
+  page: 0,             // last CheapShark page loaded (0-based)
+  hasMore: false,
+  currency: { symbol: "R", note: "Prices in South African Rand (ZAR)" },
 };
 
 // ---- DOM references ----------------------------------------------------
@@ -42,6 +45,7 @@ const currencyNote = $("#currency-note");
 const emptyState = $("#empty");
 const notice = $("#notice");
 const sourceButtons = document.querySelectorAll(".segmented__btn");
+const loadMoreBtn = $("#load-more");
 
 // ---- Derive what to show from state (filter → search → sort) ------------
 function visibleDeals() {
@@ -52,13 +56,15 @@ function visibleDeals() {
 
 // ---- Rendering -----------------------------------------------------------
 function render() {
-  const symbol = SOURCES[state.source].symbol;
+  const symbol = state.currency.symbol;
   renderStats(symbol);
+  currencyNote.textContent = state.currency.note;
 
   if (state.loading) {
     renderSkeletons();
     resultCount.textContent = "Loading live deals…";
     emptyState.hidden = true;
+    loadMoreBtn.hidden = true;
     return;
   }
 
@@ -66,10 +72,14 @@ function render() {
   grid.replaceChildren(...list.map((deal, i) => createCard(deal, symbol, i)));
 
   const total = state.deals.length;
+  const noun = state.source === "live" ? "loaded deals" : "games";
   resultCount.textContent =
-    list.length === total ? `Showing all ${total} games` : `Showing ${list.length} of ${total} games`;
-  currencyNote.textContent = SOURCES[state.source].note;
+    list.length === total ? `Showing all ${total} ${noun}` : `Showing ${list.length} of ${total} ${noun}`;
   emptyState.hidden = list.length > 0;
+
+  loadMoreBtn.hidden = !(state.source === "live" && state.hasMore);
+  loadMoreBtn.disabled = state.loadingMore;
+  loadMoreBtn.textContent = state.loadingMore ? "Loading…" : "Load more deals";
 }
 
 function renderStats(symbol) {
@@ -156,53 +166,123 @@ function hueFromText(text) {
   return hash;
 }
 
-// ---- Live data (CheapShark) ---------------------------------------------
-let liveCache = null;
+// ---- Live data (CheapShark + exchange rate) -------------------------------
 
-async function loadLiveDeals() {
-  if (liveCache) return liveCache;
-  const [storesRes, dealsRes] = await Promise.all([
-    fetch(`${API}/stores`),
-    fetch(`${API}/deals?pageSize=60&sortBy=Deal%20Rating`),
-  ]);
-  if (!storesRes.ok || !dealsRes.ok) throw new Error(`CheapShark responded ${dealsRes.status}`);
+// Small cache in sessionStorage: repeat visits within CACHE_MINUTES (and going
+// back and forth between "Brief data" and "Live") don't hit the API again.
+// Storage can be full or blocked (private mode), so every access is guarded.
+async function cachedJson(url) {
+  const key = `cache:${url}`;
+  try {
+    const hit = JSON.parse(sessionStorage.getItem(key) ?? "null");
+    if (hit && Date.now() - hit.savedAt < CACHE_MINUTES * 60_000) return hit.data;
+  } catch { /* ignore broken cache */ }
 
-  const stores = await storesRes.json();
-  const storeNames = new Map(stores.map((s) => [String(s.storeID), s.storeName]));
-  const raw = await dealsRes.json();
-
-  liveCache = raw
-    .map((d) => normalizeCheapSharkDeal(d, storeNames))
-    .filter((d) => Number.isFinite(d.salePrice) && Number.isFinite(d.normalPrice));
-  return liveCache;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url} responded ${res.status}`);
+  const data = await res.json();
+  try {
+    sessionStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
+  } catch { /* storage full or blocked: still works, just uncached */ }
+  return data;
 }
 
-async function setSource(source) {
-  if (source === state.source && !state.loading) return;
-  state.source = source;
-  sourceButtons.forEach((b) => b.setAttribute("aria-checked", String(b.dataset.source === source)));
-  hideNotice();
+async function getStoreNames() {
+  const stores = await cachedJson(`${API}/stores`);
+  return new Map(stores.map((s) => [String(s.storeID), s.storeName]));
+}
 
+// USD → ZAR rate. If it fails we simply show dollars, so this never throws.
+async function getUsdToZar() {
+  try {
+    const data = await cachedJson(RATES_API);
+    const rate = data?.rates?.ZAR;
+    return Number.isFinite(rate) && rate > 0 ? { rate, date: data.date } : null;
+  } catch (err) {
+    console.warn("Exchange rate unavailable, showing USD", err);
+    return null;
+  }
+}
+
+function dealsUrl(page, title) {
+  const params = new URLSearchParams({ pageSize: String(PAGE_SIZE), pageNumber: String(page), sortBy: "Deal Rating" });
+  if (title) params.set("title", title); // search on CheapShark's server, not just what's loaded
+  return `${API}/deals?${params}`;
+}
+
+// Every request gets a number. If the user types fast, an older, slower
+// response could arrive after a newer one; we ignore any response that
+// isn't from the latest request, so results never "jump back".
+let latestRequest = 0;
+
+async function loadLive({ more = false } = {}) {
+  const requestId = ++latestRequest;
+  const page = more ? state.page + 1 : 0;
+  if (more) state.loadingMore = true;
+  else state.loading = true;
+  render();
+
+  try {
+    const [storeNames, rate, raw] = await Promise.all([
+      getStoreNames(),
+      getUsdToZar(),
+      cachedJson(dealsUrl(page, state.query.trim())),
+    ]);
+    if (requestId !== latestRequest || state.source !== "live") return; // stale
+
+    let fresh = raw
+      .map((d) => normalizeCheapSharkDeal(d, storeNames))
+      .filter((d) => Number.isFinite(d.salePrice) && Number.isFinite(d.normalPrice));
+    if (rate) fresh = fresh.map((d) => convertPrices(d, rate.rate));
+
+    state.currency = rate
+      ? { symbol: "R", note: `Live prices converted from USD at $1 = R${rate.rate.toFixed(2)} (rate as of ${rate.date})` }
+      : { symbol: "$", note: "Live prices from CheapShark in US dollars (exchange rate unavailable)" };
+
+    // A deal can appear on two pages if CheapShark's ranking shifts between calls.
+    const seen = new Set(more ? state.deals.map((d) => d.id) : []);
+    state.deals = (more ? state.deals : []).concat(fresh.filter((d) => !seen.has(d.id)));
+    state.page = page;
+    state.hasMore = raw.length === PAGE_SIZE;
+    hideNotice();
+  } catch (err) {
+    if (requestId !== latestRequest) return;
+    console.error(err);
+    if (more) {
+      showNotice("Couldn't load more deals right now — try again in a moment.");
+    } else {
+      showNotice("Couldn't reach CheapShark right now — showing the brief's data instead.");
+      useLocalData();
+    }
+  } finally {
+    if (requestId === latestRequest) {
+      state.loading = false;
+      state.loadingMore = false;
+      update();
+    }
+  }
+}
+
+function useLocalData() {
+  state.source = "local";
+  state.deals = briefDeals;
+  state.hasMore = false;
+  state.currency = { symbol: "R", note: "Prices in South African Rand (ZAR)" };
+  sourceButtons.forEach((b) => b.setAttribute("aria-checked", String(b.dataset.source === "local")));
+}
+
+function setSource(source) {
+  if (source === state.source) return;
+  hideNotice();
   if (source === "local") {
-    state.deals = briefDeals;
-    state.loading = false;
+    latestRequest++; // cancel any live request still in flight
+    state.loading = state.loadingMore = false;
+    useLocalData();
     return update();
   }
-
-  state.loading = true;
-  render();
-  try {
-    state.deals = await loadLiveDeals();
-  } catch (err) {
-    console.error(err);
-    showNotice("Couldn't reach CheapShark right now — showing the brief's data instead.");
-    state.source = "local";
-    state.deals = briefDeals;
-    sourceButtons.forEach((b) => b.setAttribute("aria-checked", String(b.dataset.source === "local")));
-  } finally {
-    state.loading = false;
-    update();
-  }
+  state.source = "live";
+  sourceButtons.forEach((b) => b.setAttribute("aria-checked", String(b.dataset.source === "live")));
+  loadLive();
 }
 
 function showNotice(text) {
@@ -230,10 +310,20 @@ function update() {
 }
 
 // ---- Events --------------------------------------------------------------
+// Typing filters what's on screen instantly; in live mode we also ask
+// CheapShark for matching deals once the user pauses for 400 ms ("debounce"),
+// so we send one request per search instead of one per key press.
+let searchTimer;
 searchInput.addEventListener("input", (e) => {
   state.query = e.target.value;
   update();
+  if (state.source === "live") {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadLive(), 400);
+  }
 });
+
+loadMoreBtn.addEventListener("click", () => loadLive({ more: true }));
 
 onSaleInput.addEventListener("change", (e) => {
   state.onSaleOnly = e.target.checked;
@@ -252,7 +342,8 @@ $("#clear").addEventListener("click", () => {
   state.onSaleOnly = false;
   searchInput.value = "";
   onSaleInput.checked = false;
-  update();
+  if (state.source === "live") loadLive();
+  else update();
   searchInput.focus();
 });
 
@@ -264,7 +355,8 @@ document.addEventListener("keydown", (e) => {
   } else if (e.key === "Escape" && document.activeElement === searchInput) {
     searchInput.value = "";
     state.query = "";
-    update();
+    if (state.source === "live") loadLive();
+    else update();
   }
 });
 

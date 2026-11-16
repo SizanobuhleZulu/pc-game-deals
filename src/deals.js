@@ -1,12 +1,27 @@
+// @ts-check
 // Part A — pure functions over a list of game deals.
 //
 // "Pure" means: they never change the list they are given and they never touch
 // the page. That lets the exact same file run in Node (for the tests and the
 // CLI demo) and in the browser (for the web page).
+//
+// The JSDoc types below are checked by TypeScript (`npm run typecheck`), so a
+// mistake like passing a string price gets caught before the code runs.
+
+/**
+ * @typedef {Object} Deal
+ * @property {number|string} id
+ * @property {string} title
+ * @property {number} normalPrice
+ * @property {number} salePrice
+ * @property {string} store
+ * @property {string|null} [thumb]  cover image (live data only)
+ * @property {string} [url]          link to the store (live data only)
+ */
 
 /**
  * A game is on sale when its sale price is lower than its normal price.
- * @param {{normalPrice:number, salePrice:number}} deal
+ * @param {Pick<Deal, "normalPrice" | "salePrice">} deal
  * @returns {boolean}
  */
 export function isOnSale(deal) {
@@ -15,8 +30,8 @@ export function isOnSale(deal) {
 
 /**
  * Returns a NEW array with only the games that are on sale.
- * @param {Array} deals
- * @returns {Array}
+ * @param {Deal[]} deals
+ * @returns {Deal[]}
  */
 export function getOnSaleGames(deals) {
   return deals.filter(isOnSale);
@@ -32,7 +47,7 @@ export function getOnSaleGames(deals) {
  *  - normalPrice of 0             → 0   (avoids dividing by zero)
  *  - prices that aren't numbers   → throws, so bad data is caught early
  *
- * @param {{normalPrice:number, salePrice:number}} deal
+ * @param {Pick<Deal, "normalPrice" | "salePrice"> & {title?: string}} deal
  * @returns {number} integer from 0 to 100
  */
 export function discountPercent(deal) {
@@ -48,8 +63,8 @@ export function discountPercent(deal) {
  * The game you can buy for the least money right now (lowest salePrice).
  * If two games tie, the first one in the list wins (predictable result).
  * Returns null for an empty list instead of crashing.
- * @param {Array} deals
- * @returns {object|null}
+ * @param {Deal[]} deals
+ * @returns {Deal|null}
  */
 export function findCheapest(deals) {
   if (!deals || deals.length === 0) return null;
@@ -62,9 +77,9 @@ export function findCheapest(deals) {
  * Case-insensitive title search. Matches anywhere in the title, so
  * "HAD", "hades" and " Hades " all find Hades.
  * An empty / whitespace-only query returns every deal.
- * @param {Array} deals
- * @param {string} query
- * @returns {Array} a NEW array
+ * @param {Deal[]} deals
+ * @param {string|null|undefined} query
+ * @returns {Deal[]} a NEW array
  */
 export function searchByTitle(deals, query) {
   const needle = String(query ?? "").trim().toLowerCase();
@@ -76,7 +91,12 @@ export function searchByTitle(deals, query) {
 // Helpers used by the web page (Part C).
 // ---------------------------------------------------------------------------
 
-/** Sort without mutating. Ties keep their original order (stable sort). */
+/**
+ * Sort without mutating. Ties keep their original order (stable sort).
+ * @param {Deal[]} deals
+ * @param {string} sortBy  "price-asc" | "price-desc" | "discount" | "title" | "featured"
+ * @returns {Deal[]}
+ */
 export function sortDeals(deals, sortBy) {
   const copy = [...deals];
   switch (sortBy) {
@@ -93,7 +113,11 @@ export function sortDeals(deals, sortBy) {
   }
 }
 
-/** The deal with the biggest discount, or null. */
+/**
+ * The deal with the biggest discount, or null.
+ * @param {Deal[]} deals
+ * @returns {Deal|null}
+ */
 export function findBiggestDiscount(deals) {
   if (!deals || deals.length === 0) return null;
   return deals.reduce((best, deal) =>
@@ -101,9 +125,15 @@ export function findBiggestDiscount(deals) {
   );
 }
 
-/** Money formatting: formatPrice(7.49) → "R7.49", formatPrice(7.49, "$") → "$7.49". */
+/**
+ * Money formatting: formatPrice(7.49) → "R7.49", formatPrice(1057.02) → "R1,057.02".
+ * @param {number} amount
+ * @param {string} [symbol]
+ * @returns {string}
+ */
 export function formatPrice(amount, symbol = "R") {
-  return `${symbol}${amount.toFixed(2)}`;
+  const digits = amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${symbol}${digits}`;
 }
 
 /**
@@ -111,8 +141,10 @@ export function formatPrice(amount, symbol = "R") {
  *   prices are STRINGS in US dollars, and the store is a numeric storeID.
  * This converts one CheapShark deal into our shape so every function above
  * works on it unchanged.
- * @param {object} raw          one item from /api/1.0/deals
+ * @param {{dealID:string, title:string, storeID:string|number, salePrice:string, normalPrice:string, thumb?:string}} raw
+ *        one item from /api/1.0/deals
  * @param {Map<string,string>} storeNames  storeID → store name
+ * @returns {Deal}
  */
 export function normalizeCheapSharkDeal(raw, storeNames = new Map()) {
   return {
@@ -124,4 +156,18 @@ export function normalizeCheapSharkDeal(raw, storeNames = new Map()) {
     thumb: raw.thumb || null,
     url: `https://www.cheapshark.com/redirect?dealID=${encodeURIComponent(raw.dealID)}`,
   };
+}
+
+/**
+ * Converts a deal's prices with an exchange rate (e.g. USD → ZAR).
+ * Rounds to cents so we never show R133.4999999.
+ * Returns a NEW deal; the original is untouched.
+ * @param {Deal} deal
+ * @param {number} rate  how many units of the new currency per 1 of the old
+ * @returns {Deal}
+ */
+export function convertPrices(deal, rate) {
+  if (!Number.isFinite(rate) || rate <= 0) throw new RangeError(`Invalid exchange rate: ${rate}`);
+  const toCents = (/** @type {number} */ n) => Math.round(n * rate * 100) / 100;
+  return { ...deal, normalPrice: toCents(deal.normalPrice), salePrice: toCents(deal.salePrice) };
 }

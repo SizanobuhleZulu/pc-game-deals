@@ -13,6 +13,7 @@ import {
   findBiggestDiscount,
   formatPrice,
   normalizeCheapSharkDeal,
+  convertPrices,
 } from "../src/deals.js";
 
 const titles = (list) => list.map((d) => d.title);
@@ -96,6 +97,7 @@ test("findBiggestDiscount and formatPrice", () => {
   assert.equal(findBiggestDiscount([]), null);
   assert.equal(formatPrice(7.49), "R7.49");
   assert.equal(formatPrice(5, "$"), "$5.00");
+  assert.equal(formatPrice(1057.019), "R1,057.02");
 });
 
 test("normalizeCheapSharkDeal converts string prices and store IDs", () => {
@@ -109,4 +111,15 @@ test("normalizeCheapSharkDeal converts string prices and store IDs", () => {
   assert.equal(deal.store, "Steam");
   assert.equal(discountPercent(deal), 75);
   assert.equal(normalizeCheapSharkDeal({ ...raw, storeID: "99" }).store, "Store #99");
+});
+
+test("convertPrices converts USD to ZAR, rounds to cents, keeps the discount", () => {
+  const usd = { id: 1, title: "G", store: "Steam", normalPrice: 19.99, salePrice: 4.99 };
+  const zar = convertPrices(usd, 18.25);
+  assert.equal(zar.normalPrice, 364.82); // 19.99 × 18.25 = 364.8175 → 364.82
+  assert.equal(zar.salePrice, 91.07);    //  4.99 × 18.25 =  91.0675 →  91.07
+  assert.equal(discountPercent(zar), discountPercent(usd));
+  assert.equal(usd.salePrice, 4.99, "original deal is not changed");
+  assert.throws(() => convertPrices(usd, 0), RangeError);
+  assert.throws(() => convertPrices(usd, NaN), RangeError);
 });
